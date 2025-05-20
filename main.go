@@ -63,6 +63,14 @@ func generateBase64FromImage(c echo.Context) error {
 	base64Str := base64.StdEncoding.EncodeToString(buf.Bytes())
 	return c.JSON(http.StatusOK, Response{Message: base64Str})
 }
+func generateCustomQRBatch(c echo.Context) error {
+	var req []QRRequest
+	if err := c.Bind(req); err != nil {
+		return c.JSON(http.StatusBadRequest, Response{Message: err.Error()})
+	}
+	return c.JSON(http.StatusOK, Response{Message: "success"})
+}
+
 func generateCustomQR(c echo.Context) error {
 	var req QRRequest
 	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil || strings.TrimSpace(req.Data) == "" {
