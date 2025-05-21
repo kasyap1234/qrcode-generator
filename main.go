@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"image"
@@ -11,33 +12,134 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fogleman/gg"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/redis/go-redis/v9"
 	"github.com/skip2/go-qrcode"
 )
 
+type Output string
+
+const (
+	OutputBase64 Output = "base64"
+	OutputPNG    Output = "png"
+)
+
 type QRRequest struct {
+	ID         string `json:"id"`
 	Data       string `json:"data"`                  // required
 	Size       int    `json:"size"`                  // optional (default 256)
 	FGColor    string `json:"fg_color"`              // optional (default #000000)
 	BGColor    string `json:"bg_color"`              // optional (default #ffffff)
 	LogoBase64 string `json:"logo_base64,omitempty"` // optional
+	Output     Output `json:"output"`                // "png" or "base64"
 }
+
 type Response struct {
-	Message string
+	Message string `json:"message"`
 }
-type Image struct {
-}
+
 type Base64Response struct {
 	ImageBase64 string `json:"image_base64"`
 }
 
+var redisClient *redis.Client
+
 func main() {
+	initRedisClient()
+
 	e := echo.New()
 	e.POST("/generate", generateCustomQR)
 	e.POST("/generateBase64", generateBase64FromImage)
+	e.GET("/qr/:id", getQRResult)
+
+	go qrWorker()
 	log.Fatal(e.Start(":8080"))
+}
+
+func initRedisClient() {
+	redisClient = redis.NewClient(&redis.Options{
+		Addr:         "localhost:6379",
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	})
+}
+func getQRResult(c echo.Context) error {
+	// --- START DIAGNOSTIC LOGGING ---
+	log.Printf("[getQRResult] Request Path: %s", c.Path())
+	log.Printf("[getQRResult] All Param Names: %v", c.ParamNames())
+	log.Printf("[getQRResult] All Param Values: %v", c.ParamValues())
+	rawIDParam := c.Param("id")
+	log.Printf("[getQRResult] Raw c.Param(\"id\"): [%s]", rawIDParam)
+	// --- END DIAGNOSTIC LOGGING ---
+
+	ctx := context.Background()
+	id := strings.TrimSpace(rawIDParam) // Use the rawIDParam we just logged
+	log.Printf("[getQRResult] Trimmed id: [%s]", id)
+
+	if id == "" {
+		log.Printf("[getQRResult] ID is empty, returning error. Raw was: [%s]", rawIDParam)
+		return c.JSON(http.StatusBadRequest, echo.Map{"error": "id is required"})
+	}
+
+	resultKey := "qr_result:" + id
+	outputKey := "qr_result_output:" + id
+
+	outputType, err := redisClient.Get(ctx, outputKey).Result()
+	if err == redis.Nil {
+		log.Printf("[getQRResult] Output type not found for ID=%s (redis:nil).", id)
+		return c.JSON(http.StatusNotFound, echo.Map{"error": "output type not found or QR still processing"})
+	} else if err != nil {
+		log.Printf("[getQRResult] Error fetching output type for ID=%s: %v", id, err)
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "failed to retrieve QR metadata"})
+	}
+
+	data, err := redisClient.Get(ctx, resultKey).Bytes()
+	if err == redis.Nil {
+		log.Printf("[getQRResult] QR result data not found for ID=%s (redis:nil), but output type '%s' was found. Inconsistent state.", id, outputType)
+		return c.JSON(http.StatusNotFound, echo.Map{"error": "QR result data not found (inconsistent state)"})
+	} else if err != nil {
+		log.Printf("[getQRResult] Redis get error for result data ID=%s: %v", id, err)
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "failed to retrieve QR data"})
+	}
+
+	log.Printf("[getQRResult] Successfully fetched data for ID=%s, OutputType=%s", id, outputType)
+
+	if Output(outputType) == OutputBase64 {
+		return c.JSON(http.StatusOK, Base64Response{ImageBase64: string(data)})
+	}
+
+	c.Response().Header().Set(echo.HeaderContentType, "image/png")
+	c.Response().Header().Set("Content-Disposition", "inline; filename=\""+id+".png\"")
+	return c.Blob(http.StatusOK, "image/png", data)
+}
+
+func generateCustomQR(c echo.Context) error {
+	var req QRRequest
+	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Data) == "" {
+		return c.JSON(http.StatusBadRequest, echo.Map{"error": "'data' is required"})
+	}
+
+	if strings.TrimSpace(req.ID) == "" {
+		req.ID = uuid.New().String()
+	}
+
+	if req.Output != OutputBase64 {
+		req.Output = OutputPNG
+	}
+
+	payload, _ := json.Marshal(req)
+	if err := redisClient.RPush(context.Background(), "qr_queue", payload).Err(); err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "failed to queue job"})
+	}
+
+	return c.JSON(http.StatusOK, echo.Map{
+		"message": "queued",
+		"id":      req.ID,
+	})
 }
 
 func generateBase64FromImage(c echo.Context) error {
@@ -49,45 +151,64 @@ func generateBase64FromImage(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, Response{Message: err.Error()})
 	}
-	// decoding to verify image
+	defer src.Close()
+
 	img, _, err := image.Decode(src)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{Message: err.Error()})
+		return c.JSON(http.StatusBadRequest, Response{Message: "invalid image"})
 	}
-	defer src.Close()
+
 	var buf bytes.Buffer
-	// encoding it again
 	if err := png.Encode(&buf, img); err != nil {
 		return c.JSON(http.StatusInternalServerError, Response{Message: err.Error()})
 	}
-	base64Str := base64.StdEncoding.EncodeToString(buf.Bytes())
-	return c.JSON(http.StatusOK, Response{Message: base64Str})
+	return c.JSON(http.StatusOK, Base64Response{ImageBase64: base64.StdEncoding.EncodeToString(buf.Bytes())})
 }
 
-type BatchRequest []QRRequest
+func qrWorker() {
+	ctx := context.Background()
+	for {
+		res, err := redisClient.BLPop(ctx, 0, "qr_queue").Result()
+		if err != nil {
+			log.Printf("BLPop error: %v", err)
+			continue
+		}
 
-func GenerateBatchQR(c echo.Context) error {
-	var req BatchRequest
-	if err := c.Bind(req); err != nil {
-		return c.JSON(http.StatusBadRequest, Response{Message: err.Error()})
+		var req QRRequest
+		if err := json.Unmarshal([]byte(res[1]), &req); err != nil {
+			log.Printf("unmarshal error: %v", err)
+			continue
+		}
+
+		b64, err, pngBytes := ProcessQR(req)
+		if err != nil {
+			log.Printf("ProcessQR error for ID=%s: %v", req.ID, err)
+			continue
+		}
+
+		resultKey := "qr_result:" + req.ID
+		outputKey := "qr_result_output:" + req.ID
+
+		if req.Output == OutputBase64 {
+			if err := redisClient.Set(ctx, resultKey, b64, 5*time.Minute).Err(); err != nil {
+				log.Printf("failed to store base64 for ID=%s: %v", req.ID, err)
+			}
+		} else {
+			if err := redisClient.Set(ctx, resultKey, pngBytes, 5*time.Minute).Err(); err != nil {
+				log.Printf("failed to store PNG for ID=%s: %v", req.ID, err)
+			}
+		}
+
+		// Move this outside the if-else
+		if err := redisClient.Set(ctx, outputKey, string(req.Output), 5*time.Minute).Err(); err != nil {
+			log.Printf("failed to store output type for ID=%s: %v", req.ID, err)
+		}
+
+		log.Printf("Stored result for ID=%s", req.ID)
 	}
-
 }
 
-// func generateCustomQRBatch(c echo.Context) error {
-// 	var req []QRRequest
-// 	if err := c.Bind(req); err != nil {
-// 		return c.JSON(http.StatusBadRequest, Response{Message: err.Error()})
-// 	}
-// 	return c.JSON(http.StatusOK, Response{Message: "success"})
-// }
-
-func generateCustomQR(c echo.Context) error {
-	var req QRRequest
-	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil || strings.TrimSpace(req.Data) == "" {
-		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid request. 'data' is required."})
-	}
-
+func ProcessQR(req QRRequest) (string, error, []byte) {
 	if req.Size <= 0 {
 		req.Size = 256
 	}
@@ -98,67 +219,64 @@ func generateCustomQR(c echo.Context) error {
 		req.BGColor = "#ffffff"
 	}
 
-	// Parse hex colors
 	fg, err := hexToRGBA(req.FGColor)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid fg_color"})
+		return "", err, nil
 	}
 	bg, err := hexToRGBA(req.BGColor)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid bg_color"})
+		return "", err, nil
 	}
 
-	// Generate QR
 	qr, err := qrcode.New(req.Data, qrcode.High)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to create QR code"})
+		return "", err, nil
 	}
 	qr.ForegroundColor = fg
 	qr.BackgroundColor = bg
+	img := qr.Image(req.Size)
 
-	qrImg := qr.Image(req.Size)
-
-	// Add logo if provided
-	dc := gg.NewContextForImage(qrImg)
+	dc := gg.NewContextForImage(img)
 	if req.LogoBase64 != "" {
-		logoImg, err := decodeBase64Image(req.LogoBase64)
-		if err == nil {
-			logoSize := req.Size / 4
-			logoResized := resizeImage(logoImg, logoSize, logoSize)
-			dc.DrawImageAnchored(logoResized, req.Size/2, req.Size/2, 0.5, 0.5)
+		if logo, err := decodeBase64Image(req.LogoBase64); err == nil {
+			sz := req.Size / 4
+			dc.DrawImageAnchored(resizeImage(logo, sz, sz), req.Size/2, req.Size/2, 0.5, 0.5)
 		}
 	}
 
-	// Output as PNG or Base64
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, dc.Image()); err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to encode image"})
+		return "", err, nil
 	}
 
-	outputType := c.QueryParam("output")
-	if outputType == "base64" {
-		encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
-		return c.JSON(http.StatusOK, Base64Response{ImageBase64: encoded})
+	if req.Output == OutputBase64 {
+		return base64.StdEncoding.EncodeToString(buf.Bytes()), nil, nil
 	}
-
-	return c.Blob(http.StatusOK, "image/png", buf.Bytes())
+	return "", nil, buf.Bytes()
 }
 
-// hexToRGBA converts a hex string like "#ff00ff" to color.RGBA
-func hexToRGBA(hex string) (color.RGBA, error) {
-	hex = strings.TrimPrefix(hex, "#")
-	if len(hex) != 6 {
-		return color.RGBA{}, echo.NewHTTPError(http.StatusBadRequest, "Invalid hex color")
+func hexToRGBA(h string) (color.RGBA, error) {
+	h = strings.TrimPrefix(h, "#")
+	if len(h) != 6 {
+		return color.RGBA{}, echo.NewHTTPError(http.StatusBadRequest, "invalid hex color")
 	}
-	r, _ := strconv.ParseUint(hex[0:2], 16, 8)
-	g, _ := strconv.ParseUint(hex[2:4], 16, 8)
-	b, _ := strconv.ParseUint(hex[4:6], 16, 8)
-	return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255}, nil
+	r, err := strconv.ParseUint(h[0:2], 16, 8)
+	if err != nil {
+		return color.RGBA{}, err
+	}
+	g, err := strconv.ParseUint(h[2:4], 16, 8)
+	if err != nil {
+		return color.RGBA{}, err
+	}
+	b, err := strconv.ParseUint(h[4:6], 16, 8)
+	if err != nil {
+		return color.RGBA{}, err
+	}
+	return color.RGBA{uint8(r), uint8(g), uint8(b), 255}, nil
 }
 
-// decodeBase64Image parses a base64 string into an image.Image
-func decodeBase64Image(base64Str string) (image.Image, error) {
-	data, err := base64.StdEncoding.DecodeString(base64Str)
+func decodeBase64Image(s string) (image.Image, error) {
+	data, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
 		return nil, err
 	}
@@ -166,9 +284,8 @@ func decodeBase64Image(base64Str string) (image.Image, error) {
 	return img, err
 }
 
-// resizeImage resizes an image using gg context
-func resizeImage(img image.Image, width, height int) image.Image {
-	dc := gg.NewContext(width, height)
-	dc.DrawImageAnchored(img, width/2, height/2, 0.5, 0.5)
+func resizeImage(img image.Image, w, h int) image.Image {
+	dc := gg.NewContext(w, h)
+	dc.DrawImageAnchored(img, w/2, h/2, 0.5, 0.5)
 	return dc.Image()
 }

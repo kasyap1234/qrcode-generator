@@ -1,0 +1,207 @@
+{
+	"info": {
+		"_postman_id": "YOUR_COLLECTION_ID",
+		"name": "Go QR Code API",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"description": "Collection for testing the Go QR Code Generation API"
+	},
+	"item": [
+		{
+			"name": "Generate QR Code",
+			"item": [
+				{
+					"name": "Generate QR - Minimal (PNG Output, Server UUID)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"data\": \"Hello from Postman!\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/generate",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"generate"
+							]
+						},
+						"description": "Generates a QR code with minimal data. Output will be PNG (default), and ID will be server-generated."
+					},
+					"response": []
+				},
+				{
+					"name": "Generate QR - Base64 Output (Server UUID)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"data\": \"Encode me to Base64!\",\n    \"output\": \"base64\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/generate",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"generate"
+							]
+						},
+						"description": "Generates a QR code and requests Base64 output. ID will be server-generated."
+					},
+					"response": []
+				},
+				{
+					"name": "Generate QR - Custom (PNG Output, Client UUID)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"id\": \"my-custom-qr-123\",\n    \"data\": \"Custom QR with options\",\n    \"size\": 512,\n    \"fg_color\": \"#FF0000\",\n    \"bg_color\": \"#FFFF00\",\n    \"output\": \"png\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/generate",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"generate"
+							]
+						},
+						"description": "Generates a QR code with specified ID, size, colors, and PNG output."
+					},
+					"response": []
+				},
+				{
+					"name": "Generate QR - Full Options with Logo (Base64 Output)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"id\": \"qr-with-logo-example\",\n    \"data\": \"This QR has a logo and custom colors!\",\n    \"size\": 300,\n    \"fg_color\": \"#4A90E2\",\n    \"bg_color\": \"#F0F0F0\",\n    \"logo_base64\": \"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABTSURBVHhe7c4xEQAgCAMwPAn6L28EDKA40erLbMyMRERE5NiBAbAAbAAbwAawAWwAG8AGsAFsABvABrABbAAbwAawAWwAG8AGsAFsABvABrABbADXdgILArwZchwVfAAAAABJRU5ErkJggg==\", \n    \"output\": \"base64\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/generate",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"generate"
+							]
+						},
+						"description": "Generates a QR code with all options, including a sample base64 logo, and requests Base64 output. Replace `logo_base64` with your actual image's base64 string."
+					},
+					"response": []
+				},
+				{
+					"name": "Generate QR - Invalid Data (Empty Data String)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"data\": \"  \"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/generate",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"generate"
+							]
+						},
+						"description": "Attempts to generate a QR code with empty 'data', expecting a 400 Bad Request."
+					},
+					"response": []
+				}
+			],
+			"description": "Requests related to generating QR codes via the `/generate` endpoint."
+		},
+		{
+			"name": "Convert Image to Base64",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "formdata",
+					"formdata": [
+						{
+							"key": "image",
+							"type": "file",
+							"src": []
+						}
+					]
+				},
+				"url": {
+					"raw": "{{baseUrl}}/generateBase64",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"generateBase64"
+					]
+				},
+				"description": "Uploads an image file (e.g., PNG, JPG) to convert it to a Base64 encoded PNG string.\n\n**Instructions:**\n1. In the 'Body' tab, under 'form-data', for the 'image' key, click 'Select Files'.\n2. Choose an image from your local system."
+			},
+			"response": []
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8080",
+			"type": "string",
+			"description": "The base URL for the API. Change if your server runs on a different port or host."
+		}
+	]
+}
