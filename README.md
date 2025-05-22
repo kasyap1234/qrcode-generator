@@ -136,7 +136,9 @@ curl -X POST http://localhost:8080/batch-results \
 
 
 
-* Add persistent storage (e.g., Redis, SQLite).
+* Add persistent storage (e.g., Redis).
+----
+# To do
 * Add expiration time for generated QR codes.
 * Add Swagger/OpenAPI support for interactive docs.
 * Add unit tests.
