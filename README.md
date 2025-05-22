@@ -1,8 +1,4 @@
-Here's a clean and technically precise **README.md-style documentation** for your QR Code generator project with support for custom QR codes and batch results.
 
-You can copy this into your project root as `README.md`.
-
----
 
 ## 🧾 QR Code Generator API
 
