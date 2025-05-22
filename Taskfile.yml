@@ -1,0 +1,56 @@
+version: '3'
+
+vars:
+  APP_NAME: myapp
+  REDIS_CONTAINER: redis
+
+tasks:
+  build:
+    desc: Build Go binary
+    cmds:
+      - echo "Building app..."
+      - go build -o {{.APP_NAME}} main.go
+
+  deploy:
+    desc: Build and run app in background
+    deps: [build]
+    cmds:
+      - echo "Starting app in background..."
+      - nohup ./{{.APP_NAME}} > {{.APP_NAME}}.log 2>&1 &
+      - echo "App running with PID $(pgrep {{.APP_NAME}})"
+
+  logs:
+    desc: Show app logs
+    cmds:
+      - tail -f {{.APP_NAME}}.log
+
+  stop-app:
+    desc: Kill the Go app
+    cmds:
+      - |
+        PID=$(pgrep {{.APP_NAME}})
+        if [ -n "$PID" ]; then
+          echo "Killing app with PID $PID"
+          kill $PID
+        else
+          echo "App not running"
+        fi
+
+  redis-start:
+    desc: Start Redis container
+    cmds:
+      - docker run -d --name {{.REDIS_CONTAINER}} -p 6379:6379 redis
+
+  redis-stop:
+    desc: Stop Redis container
+    cmds:
+      - docker stop {{.REDIS_CONTAINER}}
+
+  redis-remove:
+    desc: Remove Redis container
+    cmds:
+      - docker rm {{.REDIS_CONTAINER}}
+
+  clean:
+    desc: Stop app and remove Redis container
+    deps: [stop-app, redis-stop, redis-remove]
