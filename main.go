@@ -37,6 +37,10 @@ type QRRequest struct {
 	LogoBase64 string `json:"logo_base64,omitempty"` // optional
 	Output     Output `json:"output"`                // "png" or "base64"
 }
+type BatchPayload struct {
+	QRRequests []QRRequest `json:"qr_requests"`
+	BatchID    string      `json:"batch_id"`
+}
 
 type Response struct {
 	Message string `json:"message"`
@@ -54,19 +58,85 @@ func main() {
 	e := echo.New()
 	e.POST("/generate", generateCustomQR)
 	e.POST("/generateBase64", generateBase64FromImage)
+	e.POST("/generatebatch", generateBatchQR)
 	e.GET("/qr/:id", getQRResult)
+	e.POST("/batch-results", getBatchResults)
 
 	go qrWorker()
 	log.Fatal(e.Start(":8080"))
 }
 
-func initRedisClient() {
+type BatchResultRequest struct {
+	IDs []string `json:"ids"`
+}
+type BatchResultItem struct {
+	ID     string `json:id"`
+	Result string `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+func initRedisClient() error {
+
 	redisClient = redis.NewClient(&redis.Options{
 		Addr:         "localhost:6379",
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
 	})
+	ctx := context.Background()
+	_, err := redisClient.Ping(ctx).Result()
+	if err != nil {
+		return err
+	}
+	return nil
 }
+func getBatchResults(c echo.Context) error {
+	var req BatchResultRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid input"})
+	}
+	ctx := context.Background()
+	results := make([]BatchResultItem, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		key := "qr_result:" + id
+		result, err := redisClient.Get(ctx, key).Result()
+		if err == redis.Nil {
+			results = append(results, BatchResultItem{
+				ID:    id,
+				Error: "result not ready ",
+			})
+		} else if err != nil {
+			results = append(results, BatchResultItem{
+				ID:    id,
+				Error: err.Error(),
+			})
+		} else {
+			results = append(results, BatchResultItem{
+				ID:     id,
+				Result: result,
+			})
+		}
+	}
+
+	return c.JSON(http.StatusOK, results)
+}
+func generateBatchQR(c echo.Context) error {
+	var payloads BatchPayload
+	if err := c.Bind(&payloads); err != nil {
+		return c.JSON(http.StatusBadRequest, echo.Map{"error": "invalid payload format"})
+	}
+	payloads.BatchID = uuid.New().String()
+	data, err := json.Marshal(payloads)
+
+	if err != nil {
+		log.Printf("failed to marshal payload %v", err)
+	}
+	ctx := context.Background()
+
+	redisClient.RPush(ctx, "qr_queue", data)
+
+	return c.JSON(http.StatusAccepted, Response{Message: "QR generation queued"})
+}
+
 func getQRResult(c echo.Context) error {
 	// --- START DIAGNOSTIC LOGGING ---
 	log.Printf("[getQRResult] Request Path: %s", c.Path())
@@ -168,43 +238,42 @@ func generateBase64FromImage(c echo.Context) error {
 func qrWorker() {
 	ctx := context.Background()
 	for {
-		res, err := redisClient.BLPop(ctx, 0, "qr_queue").Result()
+		res, err := redisClient.BLPop(ctx, 2*time.Minute, "qr_queue").Result()
 		if err != nil {
-			log.Printf("BLPop error: %v", err)
+			log.Printf("BlPop error %w", err)
 			continue
 		}
+		// convert value of res to byte to unmarshal
+		data := []byte(res[1])
+		var batch BatchPayload
+		if err := json.Unmarshal(data, &batch); err == nil && len(batch.QRRequests) > 0 {
+			for _, req := range batch.QRRequests {
+				if req.ID == "" {
+					req.ID = uuid.New().String()
+				}
+				b64, err, pngBytes := ProcessQR(req)
+				if err != nil {
+					log.Printf("Process qr Failed for id=%s %v", req.ID, err)
+					continue
+				}
+				resultKey := "qr_result:" + req.ID
+				outputKey := "qr_result_output:" + req.ID
+				if req.Output == OutputBase64 {
+					if err := redisClient.Set(ctx, resultKey, b64, 5*time.Hour).Err(); err != nil {
+						log.Printf("failed to store base64 for ID=%s %v", req.ID, err)
+					}
+				} else {
+					if err := redisClient.Set(ctx, resultKey, pngBytes, 5*time.Hour).Err(); err != nil {
+						log.Printf("failed to store png for ID=%s  %v", req.ID, err)
+					}
+				}
+				if err := redisClient.Set(ctx, outputKey, string(req.Output), 5*time.Hour).Err(); err != nil {
+					log.Printf("failed to store output type for ID=%s %v", req.ID, err)
+				}
+				log.Printf("Stored result for single ID=%s", req.ID)
 
-		var req QRRequest
-		if err := json.Unmarshal([]byte(res[1]), &req); err != nil {
-			log.Printf("unmarshal error: %v", err)
-			continue
-		}
-
-		b64, err, pngBytes := ProcessQR(req)
-		if err != nil {
-			log.Printf("ProcessQR error for ID=%s: %v", req.ID, err)
-			continue
-		}
-
-		resultKey := "qr_result:" + req.ID
-		outputKey := "qr_result_output:" + req.ID
-
-		if req.Output == OutputBase64 {
-			if err := redisClient.Set(ctx, resultKey, b64, 5*time.Minute).Err(); err != nil {
-				log.Printf("failed to store base64 for ID=%s: %v", req.ID, err)
 			}
-		} else {
-			if err := redisClient.Set(ctx, resultKey, pngBytes, 5*time.Minute).Err(); err != nil {
-				log.Printf("failed to store PNG for ID=%s: %v", req.ID, err)
-			}
 		}
-
-		// Move this outside the if-else
-		if err := redisClient.Set(ctx, outputKey, string(req.Output), 5*time.Minute).Err(); err != nil {
-			log.Printf("failed to store output type for ID=%s: %v", req.ID, err)
-		}
-
-		log.Printf("Stored result for ID=%s", req.ID)
 	}
 }
 
